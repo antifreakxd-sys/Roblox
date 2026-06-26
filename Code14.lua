@@ -1,21 +1,19 @@
--- Улучшенная версия Auto Farm для Build A Boat (русские комментарии)
--- Что сделано:
--- 1) Шаговый (покадровый) flyTo — не "перескакивает" через зоны, даём время на стриминг частей.
--- 2) Слайдер исправлен: инициализация позиции, клики по дорожке, сенсорные события.
--- 3) Увеличен maxSpeed, адаптация логики под высокие скорости.
--- 4) Hotkey H — включение/выключение фарма.
--- 5) GUI в чёрном стиле, статус и скорость отображаются.
--- 6) Защита от наложения (isFarming), отмена твинов при смерти/репавне, таймауты.
--- 7) Много проверок существования объектов и безопасное удаление временных частей.
+-- Auto Farm для Build A Boat — улучшенная стабильная версия
+-- Исправления: надёжный шаговый полёт через платформу (устраняет телепорты/дергания),
+-- аккуратное включение/выключение noclip/PlatformStand, стабильный слайдер, перетаскивание меню,
+-- ожидание загрузки частей, восстановление состояний и отключение соединений.
+-- Все комментарии на русском.
 
--- НАСТРОЙКИ АВТОФАРМА (сохраняются в getgenv)
+-- Конфигурация (сохраняется в getgenv)
 getgenv().TreasureAutoFarm = getgenv().TreasureAutoFarm or {
     Enabled = false,
-    FlySpeed = 200,        -- начальная скорость (можно менять ползунком)
+    FlySpeed = 200,        -- скорость в студзах в секунду (регулируется ползунком)
     WaitAtChest = 6,       -- время ожидания у сундука
     MinSpeed = 50,
-    MaxSpeed = 600,        -- увеличенная максимальная скорость
-    StepDistance = 12      -- максимальная длина шага при перемещении (в студиях)
+    MaxSpeed = 800,        -- допустимая верхняя граница
+    StepDistance = 6,      -- длина шага в студзах (маленькие шаги = стабильнее)
+    StepPause = 0.06,      -- пауза между шагами для стриминга
+    StreamingWait = 0.12,  -- ожидание после шага для подгрузки
 }
 
 local Players = game:GetService("Players")
@@ -23,15 +21,27 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
 
--- Ждём игрока и PlayerGui
+-- Корректное получение LocalPlayer
+local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
-    LocalPlayer = Players:WaitForChild("LocalPlayer")
+    LocalPlayer = Players.PlayerAdded:Wait()
 end
+
+-- Ждём PlayerGui
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- Утилиты для GUI
+-- Удаляем старый GUI, если он есть (избегаем дубликатов)
+local EXISTING = PlayerGui:FindFirstChild("BABFT_Mobile_AutoFarm")
+if EXISTING then
+    EXISTING:Destroy()
+end
+
+-- УТИЛИТЫ
+local function clamp(v, a, b) return math.clamp(v, a, b) end
+local function getCfg() return getgenv().TreasureAutoFarm end
+
+-- Создаём GUI
 local function makeUICorner(parent, radius)
     local c = Instance.new("UICorner")
     c.CornerRadius = radius
@@ -39,62 +49,64 @@ local function makeUICorner(parent, radius)
     return c
 end
 
--- Основной ScreenGui
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "BABFT_Mobile_AutoFarm"
-ScreenGui.Parent = PlayerGui
 ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
 
--- Стильные цвета
-local COLOR_BG = Color3.fromRGB(18, 18, 18)       -- чёрный фон
-local COLOR_PANEL = Color3.fromRGB(28, 28, 30)
-local COLOR_ACCENT = Color3.fromRGB(0, 170, 255)
-local COLOR_ON = Color3.fromRGB(50, 180, 50)
-local COLOR_OFF = Color3.fromRGB(220, 60, 60)
-local COLOR_TEXT = Color3.fromRGB(230, 230, 230)
+local COLOR_PANEL = Color3.fromRGB(20,20,20)
+local COLOR_ACCENT = Color3.fromRGB(0,170,255)
+local COLOR_ON = Color3.fromRGB(50,180,50)
+local COLOR_OFF = Color3.fromRGB(220,60,60)
+local COLOR_TEXT = Color3.fromRGB(230,230,230)
 
--- Кнопка открытия
+-- Toggle button
 local ToggleButton = Instance.new("TextButton")
 makeUICorner(ToggleButton, UDim.new(1,0))
 ToggleButton.Name = "ToggleButton"
 ToggleButton.Parent = ScreenGui
 ToggleButton.BackgroundColor3 = COLOR_ACCENT
-ToggleButton.Position = UDim2.new(0.05, 0, 0.4, 0)
-ToggleButton.Size = UDim2.new(0, 55, 0, 55)
+ToggleButton.Position = UDim2.new(0.04, 0, 0.42, 0)
+ToggleButton.Size = UDim2.new(0, 56, 0, 56)
 ToggleButton.Font = Enum.Font.GothamBold
 ToggleButton.Text = "⚓"
-ToggleButton.TextColor3 = Color3.fromRGB(255,255,255)
+ToggleButton.TextColor3 = Color3.new(1,1,1)
 ToggleButton.TextSize = 24
 
--- Главное меню
+-- Main menu
 local MainMenu = Instance.new("Frame")
-makeUICorner(MainMenu, UDim.new(0,12))
+makeUICorner(MainMenu, UDim.new(0,10))
 MainMenu.Name = "MainMenu"
 MainMenu.Parent = ScreenGui
 MainMenu.BackgroundColor3 = COLOR_PANEL
-MainMenu.Position = UDim2.new(0.35, 0, 0.35, 0)
-MainMenu.Size = UDim2.new(0, 320, 0, 220)
+MainMenu.Position = UDim2.new(0.32, 0, 0.32, 0)
+MainMenu.Size = UDim2.new(0, 340, 0, 220)
 MainMenu.Visible = false
+MainMenu.ClipsDescendants = true
 
-local Title = Instance.new("TextLabel")
-Title.Name = "Title"
-Title.Parent = MainMenu
-Title.BackgroundTransparency = 1
-Title.Size = UDim2.new(1, 0, 0, 40)
-Title.Font = Enum.Font.GothamBold
-Title.Text = "BUILD A BOAT — AUTO FARM"
-Title.TextColor3 = COLOR_TEXT
-Title.TextSize = 15
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Position = UDim2.new(0, 12, 0, 6)
+-- Title bar (используется для перетаскивания)
+local TitleBar = Instance.new("Frame")
+TitleBar.Parent = MainMenu
+TitleBar.Size = UDim2.new(1,0,0,36)
+TitleBar.BackgroundTransparency = 1
 
--- Статус (ON/OFF) и индикация скорости
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Parent = TitleBar
+TitleLabel.Size = UDim2.new(1, -12, 1, 0)
+TitleLabel.Position = UDim2.new(0, 8, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.Text = "BUILD A BOAT — AUTO FARM"
+TitleLabel.TextColor3 = COLOR_TEXT
+TitleLabel.TextSize = 14
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Status & Speed
 local StatusLabel = Instance.new("TextLabel")
-StatusLabel.Name = "StatusLabel"
 StatusLabel.Parent = MainMenu
 StatusLabel.BackgroundTransparency = 1
-StatusLabel.Position = UDim2.new(0, 12, 0, 44)
-StatusLabel.Size = UDim2.new(0.5, -12, 0, 24)
+StatusLabel.Position = UDim2.new(0, 12, 0, 40)
+StatusLabel.Size = UDim2.new(0.5, -12, 0, 22)
 StatusLabel.Font = Enum.Font.GothamSemibold
 StatusLabel.Text = "Status: OFF"
 StatusLabel.TextColor3 = COLOR_TEXT
@@ -102,36 +114,33 @@ StatusLabel.TextSize = 14
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local SpeedLabel = Instance.new("TextLabel")
-SpeedLabel.Name = "SpeedLabel"
 SpeedLabel.Parent = MainMenu
 SpeedLabel.BackgroundTransparency = 1
-SpeedLabel.Position = UDim2.new(0.5, 0, 0, 44)
-SpeedLabel.Size = UDim2.new(0.5, -12, 0, 24)
+SpeedLabel.Position = UDim2.new(0.5, 0, 0, 40)
+SpeedLabel.Size = UDim2.new(0.5, -12, 0, 22)
 SpeedLabel.Font = Enum.Font.GothamSemibold
-SpeedLabel.Text = "Speed: " .. tostring(getgenv().TreasureAutoFarm.FlySpeed)
+SpeedLabel.Text = "Speed: " .. tostring(getCfg().FlySpeed)
 SpeedLabel.TextColor3 = COLOR_TEXT
 SpeedLabel.TextSize = 14
 SpeedLabel.TextXAlignment = Enum.TextXAlignment.Right
 
--- Кнопка вкл/выкл фарма
+-- Toggle Farm Button
 local FarmToggleBtn = Instance.new("TextButton")
 makeUICorner(FarmToggleBtn, UDim.new(0,8))
-FarmToggleBtn.Name = "FarmToggleBtn"
 FarmToggleBtn.Parent = MainMenu
 FarmToggleBtn.BackgroundColor3 = COLOR_OFF
-FarmToggleBtn.Position = UDim2.new(0, 12, 0, 76)
-FarmToggleBtn.Size = UDim2.new(1, -24, 0, 42)
+FarmToggleBtn.Position = UDim2.new(0, 12, 0, 70)
+FarmToggleBtn.Size = UDim2.new(1, -24, 0, 44)
 FarmToggleBtn.Font = Enum.Font.GothamSemibold
 FarmToggleBtn.Text = "Auto Farm: OFF (H)"
-FarmToggleBtn.TextColor3 = Color3.fromRGB(255,255,255)
-FarmToggleBtn.TextSize = 15
+FarmToggleBtn.TextColor3 = Color3.new(1,1,1)
+FarmToggleBtn.TextSize = 14
 
--- Ползунок скорости: дорожка и кнопка
+-- Slider
 local SliderText = Instance.new("TextLabel")
-SliderText.Name = "SliderText"
 SliderText.Parent = MainMenu
 SliderText.BackgroundTransparency = 1
-SliderText.Position = UDim2.new(0, 12, 0, 128)
+SliderText.Position = UDim2.new(0, 12, 0, 126)
 SliderText.Size = UDim2.new(1, -24, 0, 18)
 SliderText.Font = Enum.Font.GothamSemibold
 SliderText.Text = "Speed"
@@ -141,52 +150,80 @@ SliderText.TextXAlignment = Enum.TextXAlignment.Left
 
 local SliderFrame = Instance.new("Frame")
 makeUICorner(SliderFrame, UDim.new(0,6))
-SliderFrame.Name = "SliderFrame"
 SliderFrame.Parent = MainMenu
-SliderFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 44)
-SliderFrame.Position = UDim2.new(0, 12, 0, 150)
+SliderFrame.BackgroundColor3 = Color3.fromRGB(40,40,45)
+SliderFrame.Position = UDim2.new(0, 12, 0, 148)
 SliderFrame.Size = UDim2.new(1, -24, 0, 18)
+SliderFrame.Active = true
+SliderFrame.Selectable = true
 
 local SliderButton = Instance.new("TextButton")
 makeUICorner(SliderButton, UDim.new(1,0))
-SliderButton.Name = "SliderButton"
 SliderButton.Parent = SliderFrame
 SliderButton.BackgroundColor3 = COLOR_ACCENT
-SliderButton.Position = UDim2.new(0, 0, -0.5, 0)
 SliderButton.Size = UDim2.new(0, 18, 0, 18)
+SliderButton.Position = UDim2.new(0,0,-0.5,0)
 SliderButton.Text = ""
 
--- Функции конфигурации
-local function getCfg() return getgenv().TreasureAutoFarm end
+-- Дефолтное состояние
+local connections = {}
+local function disconnectAll()
+    for _, c in pairs(connections) do
+        if c and c.Disconnect then
+            c:Disconnect()
+        elseif c and type(c) == "function" then
+            pcall(c)
+        end
+    end
+    connections = {}
+end
+
+-- Полезные хелперы
+local function waitForPart(part, timeout)
+    timeout = timeout or 5
+    local start = tick()
+    while tick() - start < timeout do
+        if part and part:IsDescendantOf(Workspace) then return true end
+        task.wait(0.08)
+    end
+    return false
+end
 
 -- Установка позиции ползунка по текущей скорости
 local function setSliderFromSpeed()
     local cfg = getCfg()
-    if not SliderFrame then return end
+    if not SliderFrame or not SliderFrame.AbsoluteSize then return end
     local minS = cfg.MinSpeed or 50
-    local maxS = cfg.MaxSpeed or 600
-    local cur = math.clamp(cfg.FlySpeed or 100, minS, maxS)
+    local maxS = cfg.MaxSpeed or 800
+    cfg.FlySpeed = clamp(cfg.FlySpeed, minS, maxS)
+    local cur = cfg.FlySpeed
     local percent = (cur - minS) / math.max(1, (maxS - minS))
     SliderButton.Position = UDim2.new(percent, -9, -0.5, 0)
     SpeedLabel.Text = "Speed: " .. tostring(cur)
 end
 
--- Обновление скорости по позиции мыши/касания
+-- Обновление скорости по позиции
 local isSliding = false
 local function updateSliderFromInput(posX)
     if not SliderFrame or not SliderFrame.AbsoluteSize then return end
     local sliderPos = SliderFrame.AbsolutePosition
     local sliderWidth = SliderFrame.AbsoluteSize.X
     local mouseX = posX - sliderPos.X
-    local percent = math.clamp(mouseX / sliderWidth, 0, 1)
+    local percent = clamp(mouseX / math.max(1, sliderWidth), 0, 1)
     SliderButton.Position = UDim2.new(percent, -9, -0.5, 0)
     local cfg = getCfg()
-    local finalSpeed = math.floor((cfg.MinSpeed or 50) + percent * ((cfg.MaxSpeed or 600) - (cfg.MinSpeed or 50)))
-    cfg.FlySpeed = finalSpeed
-    SpeedLabel.Text = "Speed: " .. tostring(finalSpeed)
+    local finalSpeed = math.floor((cfg.MinSpeed or 50) + percent * ((cfg.MaxSpeed or 800) - (cfg.MinSpeed or 50)))
+    cfg.FlySpeed = clamp(finalSpeed, cfg.MinSpeed, cfg.MaxSpeed)
+    SpeedLabel.Text = "Speed: " .. tostring(cfg.FlySpeed)
 end
 
--- Подключаем клики и перетаскивание для ползунка
+-- Подключаем обработчики с сохранением ссылок
+connections.sliderInputChanged = UserInputService.InputChanged:Connect(function(input)
+    if isSliding and input.Position then
+        updateSliderFromInput(input.Position.X)
+    end
+end)
+
 SliderButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         isSliding = true
@@ -198,44 +235,55 @@ SliderButton.InputEnded:Connect(function(input)
         isSliding = false
     end
 end)
--- Дорожка реагирует на нажатие (клик по дорожке)
+
 SliderFrame.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         if input.Position then updateSliderFromInput(input.Position.X) end
     end
 end)
--- Слежение за движением мыши/касания
-UserInputService.InputChanged:Connect(function(input)
-    if isSliding and input.Position then
-        updateSliderFromInput(input.Position.X)
-    end
+
+-- Инициализация после получения размеров
+connections.sliderSize = SliderFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+    setSliderFromSpeed()
 end)
+-- если уже есть размер — выставим
+task.delay(0.05, setSliderFromSpeed)
 
--- Инициализация позиции ползунка через пару тиков (чтобы AbsoluteSize заполнился)
-task.delay(0.1, setSliderFromSpeed)
-
--- Drag для ToggleButton (перетаскивание на экране)
-local dragging, dragInput, dragStart, startPos
-ToggleButton.InputBegan:Connect(function(input)
+-- Dragging для MainMenu (по TitleBar)
+local draggingMenu, menuDragInput, menuDragStart, menuStartPos
+TitleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true; dragStart = input.Position; startPos = ToggleButton.Position
-        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        draggingMenu = true
+        menuDragStart = input.Position
+        menuStartPos = MainMenu.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                draggingMenu = false
+            end
+        end)
     end
 end)
-ToggleButton.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end end)
-UserInputService.InputChanged:Connect(function(input)
-    if input == dragInput and dragging then
-        local delta = input.Position - dragStart
-        ToggleButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        menuDragInput = input
+    end
+end)
+connections.menuMove = UserInputService.InputChanged:Connect(function(input)
+    if draggingMenu and input == menuDragInput then
+        local delta = input.Position - menuDragStart
+        MainMenu.Position = UDim2.new(menuStartPos.X.Scale, menuStartPos.X.Offset + delta.X, menuStartPos.Y.Scale, menuStartPos.Y.Offset + delta.Y)
     end
 end)
 
-ToggleButton.MouseButton1Click:Connect(function() MainMenu.Visible = not MainMenu.Visible end)
+-- Toggle visibility
+ToggleButton.MouseButton1Click:Connect(function()
+    MainMenu.Visible = not MainMenu.Visible
+end)
 
--- Переключение фарма (кнопка)
-FarmToggleBtn.MouseButton1Click:Connect(function()
+-- Включение/отключение автофарма
+local function setFarmEnabled(state)
     local cfg = getCfg()
-    cfg.Enabled = not cfg.Enabled
+    cfg.Enabled = state
     if cfg.Enabled then
         FarmToggleBtn.BackgroundColor3 = COLOR_ON
         FarmToggleBtn.Text = "Auto Farm: ON (H)"
@@ -245,50 +293,21 @@ FarmToggleBtn.MouseButton1Click:Connect(function()
         FarmToggleBtn.Text = "Auto Farm: OFF (H)"
         StatusLabel.Text = "Status: OFF"
     end
-end)
-
--- Горячая клавиша H для включения/выключения
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.H then
-        local cfg = getCfg()
-        cfg.Enabled = not cfg.Enabled
-        if cfg.Enabled then
-            FarmToggleBtn.BackgroundColor3 = COLOR_ON
-            FarmToggleBtn.Text = "Auto Farm: ON (H)"
-            StatusLabel.Text = "Status: ON"
-        else
-            FarmToggleBtn.BackgroundColor3 = COLOR_OFF
-            FarmToggleBtn.Text = "Auto Farm: OFF (H)"
-            StatusLabel.Text = "Status: OFF"
-        end
-    end
-end)
-
--- NOCLIP: применяем только при включённом режиме, и только к коллидируемым деталям
-RunService.Heartbeat:Connect(function()
-    local cfg = getCfg()
-    if cfg.Enabled and LocalPlayer.Character then
-        for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then
-                part.CanCollide = false
-            end
-        end
-    end
-end)
-
--- Хелперы для безопасного ожидания частей/стриминга
-local function waitForPart(part, timeout)
-    timeout = timeout or 5
-    local start = tick()
-    while tick() - start < timeout do
-        if part and part.Parent then return true end
-        task.wait(0.1)
-    end
-    return false
 end
 
--- Шаговый flyTo: разбиваем путь на маленькие твины, даём время на стриминг между шагами
+FarmToggleBtn.MouseButton1Click:Connect(function()
+    setFarmEnabled(not getCfg().Enabled)
+end)
+
+-- Горячая клавиша H
+connections.hotkey = UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.H then
+        setFarmEnabled(not getCfg().Enabled)
+    end
+end)
+
+-- УСТОЙЧИВОЕ ПЛАВНОЕ ПЕРЕМЕЩЕНИЕ (platform-driven)
 local function flyToPart(targetPart)
     local cfg = getCfg()
     if not cfg.Enabled then return false end
@@ -298,105 +317,118 @@ local function flyToPart(targetPart)
     local character = LocalPlayer.Character
     if not character then return false end
     local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-
-    -- Целевая позиция: немного над триггером (чтобы сработать касание)
-    local targetCFrame = targetPart.CFrame
-    local targetPos = targetCFrame.Position
-
-    local distance = (hrp.Position - targetPos).Magnitude
-    if distance < 1 then
-        -- уже рядом
-        return true
-    end
-
-    -- Разбиваем на шаги по StepDistance
-    local maxStep = cfg.StepDistance or 12
-    local steps = math.max(1, math.ceil(distance / maxStep))
-    local totalDuration = math.max(0.05, distance / math.max(1, cfg.FlySpeed or 200))
-    local stepDuration = totalDuration / steps
-
-    -- safety connections
     local humanoid = character:FindFirstChildOfClass("Humanoid")
-    local diedConn
-    if humanoid then
-        diedConn = humanoid.Died:Connect(function()
-            -- ничего: просто шаги остановятся по проверкам ниже
-        end)
-    end
+    if not hrp or not humanoid then return false end
+
+    -- фиксируем стартовую и целевую позиции
+    local startPos = hrp.Position
+    local targetPos = targetPart.Position
+    local totalDist = (startPos - targetPos).Magnitude
+    if totalDist < 1 then return true end
+
+    local step = cfg.StepDistance or 6
+    local steps = math.max(1, math.ceil(totalDist / step))
+    local speed = clamp(cfg.FlySpeed or 200, cfg.MinSpeed or 50, cfg.MaxSpeed or 800)
+
+    -- считаем длительность для каждого шага: время = расстояние / скорость
+    local perStepDist = totalDist / steps
+    local stepDuration = math.max(0.03, perStepDist / math.max(1, speed))
+
+    -- включаем PlatformStand для устойчивости
+    local prevPlatformStand = humanoid.PlatformStand
+    local prevAutoRotate = humanoid.AutoRotate
+    humanoid.PlatformStand = true
+    humanoid.AutoRotate = false
 
     local success = true
+    local heartbeatConn
+
     for i = 1, steps do
         if not cfg.Enabled then success = false; break end
         if not hrp or not hrp.Parent then success = false; break end
-        -- вычисляем промежуточную точку
+
         local t = i / steps
-        local interp = hrp.CFrame:Lerp(CFrame.new(targetPos), t)
-        -- чуть выше цели, чтобы не залипать в земле
-        local desiredCFrame = CFrame.new(interp.Position + Vector3.new(0, 2, 0), targetPos)
-        -- создаём короткий твин
-        local ok, tween = pcall(function()
-            return TweenService:Create(hrp, TweenInfo.new(math.max(0.02, stepDuration), Enum.EasingStyle.Linear), {CFrame = desiredCFrame})
+        local nextPos = Vector3.new(
+            startPos.X + (targetPos.X - startPos.X) * t,
+            startPos.Y + (targetPos.Y - startPos.Y) * t,
+            startPos.Z + (targetPos.Z - startPos.Z) * t
+        )
+        -- платформе позиция чуть ниже игрока
+        local platformTarget = CFrame.new(nextPos - Vector3.new(0, 3.5, 0))
+
+        -- Создаём временную платформу под игроком
+        local platform = Instance.new("Part")
+        platform.Size = Vector3.new(8, 1, 8)
+        platform.Anchored = true
+        platform.Transparency = 1
+        platform.CanCollide = false
+        platform.CFrame = hrp.CFrame * CFrame.new(0, -3.5, 0)
+        platform.Parent = Workspace
+
+        -- Твин платформы
+        local ok, platTween = pcall(function()
+            return TweenService:Create(platform, TweenInfo.new(stepDuration, Enum.EasingStyle.Linear), {CFrame = platformTarget})
         end)
-        if not ok or not tween then
+        if not ok or not platTween then platform:Destroy(); success = false; break end
+
+        -- Обновляем HRP каждый heartbeat, чтобы сердце следовало за платформой
+        heartbeatConn = RunService.Heartbeat:Connect(function()
+            if hrp and hrp.Parent and platform and platform.Parent then
+                local desired = platform.CFrame * CFrame.new(0, 3.5, 0)
+                -- направляем hrp к desired плавно (без резких телепортов)
+                hrp.CFrame = desired
+            end
+        end)
+
+        platTween:Play()
+        local startTick = tick()
+        -- Ждём завершения твина или прерывания
+        while platTween.PlaybackState == Enum.PlaybackState.Playing do
+            task.wait(0.02)
+            if not cfg.Enabled then pcall(function() platTween:Cancel() end); break end
+            if not hrp or not hrp.Parent then pcall(function() platTween:Cancel() end); break end
+            if tick() - startTick > math.max(2, stepDuration * 6) then pcall(function() platTween:Cancel() end); break end
+        end
+
+        -- отключаем heartbeat
+        if heartbeatConn then heartbeatConn:Disconnect(); heartbeatConn = nil end
+        -- небольшая пауза для стриминга
+        task.wait(cfg.StreamingWait or 0.08)
+
+        -- уничтожаем платформу
+        if platform and platform.Parent then platform:Destroy() end
+
+        -- safety: при сильном отличии позиции — прервём
+        if hrp and (hrp.Position - nextPos).Magnitude > math.max(10, step * 2) then
             success = false
             break
         end
-
-        tween:Play()
-        local startTick = tick()
-        while tween.PlaybackState == Enum.PlaybackState.Playing do
-            task.wait(0.03)
-            -- прерывания
-            if not cfg.Enabled then
-                pcall(function() tween:Cancel() end)
-                success = false
-                break
-            end
-            -- если HRP удалён (репавн), прервём
-            if not hrp or not hrp.Parent then
-                pcall(function() tween:Cancel() end)
-                success = false
-                break
-            end
-            -- safety timeout per step
-            if tick() - startTick > math.max(1, stepDuration * 4) then
-                pcall(function() tween:Cancel() end)
-                break
-            end
-        end
-        if not success then break end
-        -- даём немного времени на стриминг ближайших частей
-        task.wait(0.06)
     end
 
-    -- Сброс скорости/импульса
+    -- сброс состояния
+    pcall(function() if humanoid then humanoid.PlatformStand = prevPlatformStand; humanoid.AutoRotate = prevAutoRotate end end)
     pcall(function() if hrp then hrp.Velocity = Vector3.new(0,0,0) end end)
-    if diedConn then diedConn:Disconnect() end
     return success
 end
 
--- Вспомогательная: собрать отсортированные CaveStage
+-- Получаем сортированные стадии
 local function getSortedCaveStages(normalStages)
     local stages = {}
     if not normalStages then return stages end
     for _, child in pairs(normalStages:GetChildren()) do
         local n = child.Name:match("^CaveStage(%d+)$")
-        if n then
-            table.insert(stages, {num = tonumber(n), part = child})
-        end
+        if n then table.insert(stages, {num = tonumber(n), part = child}) end
     end
     table.sort(stages, function(a,b) return a.num < b.num end)
     return stages
 end
 
--- Защита от наложения
+-- Основной цикл фарма (с защитой)
 local isFarming = false
 
--- Основной цикл фарма
 task.spawn(function()
     while true do
-        task.wait(0.35)
+        task.wait(0.25)
         local cfg = getCfg()
         if cfg.Enabled and not isFarming then
             isFarming = true
@@ -407,7 +439,7 @@ task.spawn(function()
                 local normalStages = Workspace:FindFirstChild("BoatStages") and Workspace.BoatStages:FindFirstChild("NormalStages")
                 if not normalStages then isFarming = false; return end
 
-                -- Получаем сортированные стадии
+                -- Пролетаем по стадиям
                 local stages = getSortedCaveStages(normalStages)
                 for _, entry in ipairs(stages) do
                     if not cfg.Enabled then break end
@@ -415,15 +447,14 @@ task.spawn(function()
                     if stage then
                         local darknessPart = stage:FindFirstChild("DarknessPart")
                         if darknessPart and darknessPart:IsA("BasePart") then
-                            -- Ждём подгрузки части и пытаемся плавно подлететь
-                            if waitForPart(darknessPart, 3) then
-                                flyToPart(darknessPart)
+                            if waitForPart(darknessPart, 4) then
+                                local ok = flyToPart(darknessPart)
+                                if not ok then task.wait(0.2) end
                             else
-                                -- если не подгрузилось — даём чуть больше времени
-                                task.wait(0.2)
+                                task.wait(0.25)
                             end
-                            task.wait(0.04)
                         end
+                        task.wait(0.03)
                     end
                 end
 
@@ -431,38 +462,36 @@ task.spawn(function()
                 if cfg.Enabled and normalStages:FindFirstChild("TheEnd") then
                     local chest = normalStages.TheEnd:FindFirstChild("GoldenChest")
                     if chest and chest:FindFirstChild("Trigger") and chest.Trigger:IsA("BasePart") then
-                        -- подлетаем к триггеру сундука, сначала чуть выше, потом на точку
-                        if waitForPart(chest.Trigger, 4) then
+                        if waitForPart(chest.Trigger, 5) then
                             flyToPart(chest.Trigger)
-                            -- дополнительно подвинуться точнее чтобы сработал триггер
-                            task.wait(0.15)
+                            task.wait(0.12)
                             pcall(function() flyToPart(chest.Trigger) end)
-                            -- ждём заданное время у сундука
                             local waited = 0; local waitTime = cfg.WaitAtChest or 6
                             while waited < waitTime and cfg.Enabled do
-                                task.wait(0.25)
-                                waited = waited + 0.25
+                                task.wait(0.25); waited = waited + 0.25
                             end
                         end
                     end
                 end
 
-                -- Респавн: безопасно убиваем персонажа и ждём CharacterAdded
+                -- Респавн: безопасно умираем и ждём новый Character с HRP
                 if cfg.Enabled then
                     local respawned = false
-                    local connection
-                    connection = LocalPlayer.CharacterAdded:Connect(function()
+                    local conn
+                    conn = LocalPlayer.CharacterAdded:Connect(function()
                         respawned = true
-                        if connection then connection:Disconnect() end
+                        if conn then conn:Disconnect() end
                     end)
                     local humanoid = character:FindFirstChildOfClass("Humanoid")
-                    if humanoid and humanoid.Health > 0 then
-                        -- безопасное убийство
-                        humanoid.Health = 0
-                    end
-                    local timeout = 15
+                    if humanoid and humanoid.Health > 0 then humanoid.Health = 0 end
                     local startt = tick()
-                    repeat task.wait(0.2) until respawned or (tick() - startt > timeout)
+                    repeat task.wait(0.2) until respawned or (tick() - startt > 20)
+                    if respawned then
+                        -- дождёмся HRP
+                        local newChar = LocalPlayer.Character
+                        if newChar then newChar:WaitForChild("HumanoidRootPart", 10)
+                        end
+                    end
                 end
             end)
             isFarming = false
@@ -470,4 +499,10 @@ task.spawn(function()
     end
 end)
 
--- Конец скрипта
+-- Очистка соединений при выгрузке скрипта (если будет необходимость)
+-- (Оставляем подключённые слушатели активными, т.к. скрипт работает в сессии.)
+
+-- Сохраняем текущий слайдер/GUI
+setSliderFromSpeed()
+
+-- Конец файла
